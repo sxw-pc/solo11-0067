@@ -1,0 +1,19 @@
+repository:
+  base_url: "http://127.0.0.1:8787/oai"
+  metadata_prefix: "oai_dc"
+  set_spec: null
+  from_date: null
+  until_date: null
+
+http:
+  timeout_seconds: 10
+  user_agent: "metaharvest-demo/0.1 (local only)"
+
+harvest:
+  max_pages: null
+
+storage:
+  db_path: "../var/metaharvest.sqlite3"
+  archive_dir: "../var/archive"
+  report_dir: "../var/reports"
+  audit_log: "../var/audit/requests.jsonl"

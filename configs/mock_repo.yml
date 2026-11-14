@@ -1,0 +1,18 @@
+server:
+  host: "127.0.0.1"
+  port: 8787
+
+repository:
+  name: "示例机构仓储（离线演示）"
+  base_url: "http://127.0.0.1:8787/oai"
+  admin_email: "admin@demo.invalid"
+  earliest_datestamp: "2024-02-01T09:00:00Z"
+  description: "完全合成的 OAI-PMH 演示仓储，仅用于本地评测与开发。"
+
+seed:
+  path: "../fixtures/oai_seed.yml"
+
+pagination:
+  page_size: 4
+  token_ttl_seconds: 3600
+  token_secret: "demo-only-token-secret-not-a-credential"

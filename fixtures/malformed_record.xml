@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE record [
+  <!ENTITY demo SYSTEM "file:///demo.invalid/not-a-real-file.txt">
+]>
+<record>
+  <header>
+    <identifier>oai:demo.invalid:unsafe/0001</identifier>
+    <datestamp>2024-08-01T00:00:00Z</datestamp>
+  </header>
+  <metadata>
+    <dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">&demo;</dc:title>
+  </metadata>
+</record>
