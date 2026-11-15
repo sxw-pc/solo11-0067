@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from .constants import DEFAULT_USER_AGENT, LOCAL_HOSTS
+from .constants import DEFAULT_USER_AGENT, LOCAL_HOSTS, RETRY_POLICIES
 from .oai_errors import ConfigError
 from .util import parse_datestamp
 
@@ -38,11 +38,30 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class RetryConfig:
+    """Bounded retry behaviour for idempotent OAI GET requests.
+
+    ``inline`` sleeps while the server's due time fits inside
+    ``total_wait_seconds``. ``deferred`` never sleeps longer than
+    ``deferred_wait_seconds``; anything longer persists ``retry_not_before``
+    and interrupts the run for an operator/scheduler resume.
+    """
+
+    policy: str = "deferred"
+    max_attempts: int = 3
+    default_wait_seconds: float = 5.0
+    max_retry_after_seconds: float = 120.0
+    total_wait_seconds: float = 300.0
+    deferred_wait_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
 class HarvestConfig:
     repository: RepositoryConfig
     http: HTTPConfig
     storage: StorageConfig
     max_pages: int | None = None
+    retry: RetryConfig = RetryConfig()
 
 
 @dataclass(frozen=True)
@@ -112,6 +131,16 @@ def _positive_int(mapping: dict[str, Any], key: str, default: int) -> int:
     return result
 
 
+def _non_negative_float(mapping: dict[str, Any], key: str, default: float) -> float:
+    try:
+        result = float(mapping.get(key, default))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"配置项 {key} 必须是数字") from exc
+    if result < 0:
+        raise ConfigError(f"配置项 {key} 不得为负数")
+    return result
+
+
 def _path(base_dir: Path, mapping: dict[str, Any], key: str) -> Path:
     raw = _text(mapping, key)
     path = Path(raw).expanduser()
@@ -147,6 +176,7 @@ def load_harvest_config(path: str | Path) -> HarvestConfig:
     http_raw = _mapping(raw, "http", required=False)
     storage_raw = _mapping(raw, "storage")
     harvest_raw = _mapping(raw, "harvest", required=False)
+    retry_raw = _mapping(raw, "retry", required=False)
 
     from_date = _optional_text(repository_raw, "from_date")
     until_date = _optional_text(repository_raw, "until_date")
@@ -162,6 +192,8 @@ def load_harvest_config(path: str | Path) -> HarvestConfig:
     max_pages: int | None = None
     if max_pages_raw is not None:
         max_pages = _positive_int(harvest_raw, "max_pages", 0)
+
+    retry = _retry_config(retry_raw)
 
     return HarvestConfig(
         repository=RepositoryConfig(
@@ -182,6 +214,34 @@ def load_harvest_config(path: str | Path) -> HarvestConfig:
             audit_log=_path(base_dir, storage_raw, "audit_log"),
         ),
         max_pages=max_pages,
+        retry=retry,
+    )
+
+
+def _retry_config(raw: dict[str, Any]) -> RetryConfig:
+    policy = _text(raw, "policy", "deferred").lower()
+    if policy not in RETRY_POLICIES:
+        raise ConfigError(
+            f"retry.policy 必须是 {' 或 '.join(RETRY_POLICIES)}，当前为 {policy}"
+        )
+    max_attempts = _positive_int(raw, "max_attempts", 3)
+    default_wait = _non_negative_float(raw, "default_wait_seconds", 5.0)
+    max_retry_after = _non_negative_float(raw, "max_retry_after_seconds", 120.0)
+    total_wait = _non_negative_float(raw, "total_wait_seconds", 300.0)
+    deferred_wait = _non_negative_float(raw, "deferred_wait_seconds", 5.0)
+    if deferred_wait > total_wait:
+        raise ConfigError("retry.deferred_wait_seconds 不得大于 total_wait_seconds")
+    if max_retry_after > total_wait:
+        raise ConfigError("retry.max_retry_after_seconds 不得大于 total_wait_seconds")
+    if default_wait > max_retry_after:
+        raise ConfigError("retry.default_wait_seconds 不得大于 max_retry_after_seconds")
+    return RetryConfig(
+        policy=policy,
+        max_attempts=max_attempts,
+        default_wait_seconds=default_wait,
+        max_retry_after_seconds=max_retry_after,
+        total_wait_seconds=total_wait,
+        deferred_wait_seconds=deferred_wait,
     )
 
 

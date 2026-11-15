@@ -11,7 +11,7 @@ from pathlib import Path
 from .config import HarvestConfig, load_harvest_config, load_mock_config
 from .db import Database
 from .demo import run_demo
-from .harvester import Harvester
+from .harvester import Harvester, ResumeTooEarly
 from .mock_repository import create_app
 from .oai_errors import MetaHarvestError
 from .report import write_reports
@@ -56,6 +56,11 @@ def _parser() -> argparse.ArgumentParser:
     harvest.add_argument("--set", dest="set_spec", help="OAI setSpec")
     harvest.add_argument("--metadata-prefix", dest="metadata_prefix")
     harvest.add_argument("--max-pages", type=int, help="本次运行最多请求页数")
+    harvest.add_argument(
+        "--retry-policy",
+        choices=["inline", "deferred"],
+        help="瞬时失败重试策略：inline 在总预算内等待完成，deferred 持久化截止时间后中断",
+    )
     harvest.add_argument("--db", type=Path, help="覆盖 SQLite 台账路径")
     harvest.add_argument("--archive-dir", type=Path, help="覆盖原始 XML 归档目录")
     harvest.add_argument("--audit-log", type=Path, help="覆盖请求审计日志路径")
@@ -120,6 +125,10 @@ def _storage_overrides(
 
 def _cmd_harvest(args: argparse.Namespace) -> int:
     config = _storage_overrides(load_harvest_config(args.config), args)
+    if args.retry_policy:
+        config = replace(
+            config, retry=replace(config.retry, policy=args.retry_policy)
+        )
     if args.resume is not None:
         if any(
             value is not None
@@ -161,6 +170,8 @@ def _cmd_harvest(args: argparse.Namespace) -> int:
             f"python -m metaharvest harvest --config {args.config} "
             f"--resume {result.run_id} --db {config.storage.db_path}"
         )
+        if result.retry_not_before:
+            payload["retry_not_before"] = result.retry_not_before
     _emit(payload)
     return 0 if result.status in {"completed", "interrupted"} else 1
 
@@ -213,6 +224,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("已中断。", file=sys.stderr)
         return 130
+    except ResumeTooEarly as exc:
+        print(f"尚未到重试时间: {exc}", file=sys.stderr)
+        return 3
     except (MetaHarvestError, OSError, ValueError) as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 1

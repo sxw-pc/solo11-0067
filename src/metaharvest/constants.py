@@ -29,6 +29,11 @@ LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 REDIRECT_LIMIT = 3
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
+# Explicit allowlist of HTTP statuses that may be retried. Everything else
+# (including 4xx client errors and HTTP 200 OAI-PMH protocol errors) is final.
+RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 502, 503, 504})
+RETRY_POLICIES = ("inline", "deferred")
+
 RUN_STATUSES = ("running", "completed", "interrupted", "failed")
 TERMINAL_RUN_STATUSES = frozenset({"completed", "interrupted", "failed"})
 

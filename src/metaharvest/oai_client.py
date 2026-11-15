@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .http_client import HTTPClient
-from .oai_errors import ConfigError
+from .oai_errors import ConfigError, HttpRequestError
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,23 @@ class OAIResponse:
     params: dict[str, str]
 
 
+def build_params(verb: str, parameters: dict[str, Any]) -> dict[str, str]:
+    """Normalize verb + keyword arguments into the exact query parameters.
+
+    Shared by the client and the harvester's attempt evidence so both agree on
+    the wire shape (notably: a continuation request carries only ``verb`` and
+    ``resumptionToken``).
+    """
+    params = {"verb": verb}
+    for key, value in parameters.items():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            params[key] = text
+    return params
+
+
 class OAIClient:
     def __init__(self, base_url: str, http_client: HTTPClient) -> None:
         parts = urlsplit(base_url)
@@ -32,14 +49,16 @@ class OAIClient:
         self.http = http_client
 
     def _fetch(self, verb: str, **parameters: Any) -> OAIResponse:
-        params = {"verb": verb}
-        for key, value in parameters.items():
-            if value is None:
-                continue
-            text = str(value).strip()
-            if text:
-                params[key] = text
-        response = self.http.get(self.base_url, params=params)
+        params = build_params(verb, parameters)
+        try:
+            response = self.http.get(self.base_url, params=params)
+        except HttpRequestError as exc:
+            # Preserve the exact request shape (notably resumptionToken) so the
+            # retry layer can replay this request verbatim instead of
+            # restarting from the first page.
+            if not exc.params:
+                exc.params = dict(params)
+            raise
         return OAIResponse(
             verb=verb,
             request_url=response.url,

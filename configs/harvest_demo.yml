@@ -12,6 +12,14 @@ http:
 harvest:
   max_pages: null
 
+retry:
+  policy: "deferred"
+  max_attempts: 3
+  default_wait_seconds: 5
+  max_retry_after_seconds: 120
+  total_wait_seconds: 300
+  deferred_wait_seconds: 5
+
 storage:
   db_path: "../var/metaharvest.sqlite3"
   archive_dir: "../var/archive"

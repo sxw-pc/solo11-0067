@@ -79,19 +79,44 @@ def build_report(db: Database, run_id: int) -> dict[str, Any]:
     if run is None:
         raise ReportError(f"收割运行不存在: {run_id}")
     raw_responses = db.raw_responses_for_run(run_id)
+    attempts = db.request_attempts_for_run(run_id)
     records = db.records.for_run(run_id)
     errors = db.errors_for_run(run_id)
     events = db.events_for_run(run_id)
     integrity = _verify_evidence(run, raw_responses)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": iso_z(),
         "run": run,
         "records": records,
         "raw_responses": raw_responses,
+        "attempts": attempts,
+        "attempt_summary": _attempt_summary(attempts),
         "errors": errors,
         "events": events,
         "integrity": integrity,
+    }
+
+
+def _attempt_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate HTTP attempt evidence separately from archived pages."""
+    outcomes: dict[str, int] = {}
+    for attempt in attempts:
+        outcomes[attempt["outcome"]] = outcomes.get(attempt["outcome"], 0) + 1
+    waits = [float(item["wait_seconds"] or 0) for item in attempts]
+    return {
+        "total": len(attempts),
+        "outcomes": outcomes,
+        "retried": sum(1 for item in attempts if item["retryable"]),
+        "waited_seconds": round(sum(waits), 3),
+        "last_due_at": next(
+            (
+                item["due_at"]
+                for item in reversed(attempts)
+                if item.get("due_at")
+            ),
+            None,
+        ),
     }
 
 
@@ -147,6 +172,13 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- 时间窗：`{run['from_date'] or '(无)'}` → `{run['until_date'] or '(无)'}`",
         f"- 开始：`{run['started_at']}`",
         f"- 结束：`{run['finished_at'] or '(未结束)'}`",
+        f"- 重试策略：`{run.get('retry_policy') or '(未设置)'}`",
+    ]
+    if run.get("retry_not_before"):
+        lines.append(f"- 重试不早于：`{run['retry_not_before']}`")
+    if run.get("interrupted_reason"):
+        lines.append(f"- 中断原因：`{run['interrupted_reason']}`")
+    lines.extend([
         f"- 报告生成：`{report['generated_at']}`",
         "",
         "## 收割统计",
@@ -164,12 +196,43 @@ def _markdown(report: dict[str, Any]) -> str:
         "",
         "| 页 | HTTP | 字节 | SHA-256 | 归档路径 |",
         "| ---: | ---: | ---: | --- | --- |",
-    ]
+    ])
     for item in report["raw_responses"]:
         lines.append(
             f"| {item['page_number']} | {item['http_status']} | {item['size_bytes']} | "
             f"`{item['sha256'][:16]}…` | `{_md(item['archive_path'])}` |"
         )
+    lines.extend(["", "## 请求尝试", ""])
+    summary = report["attempt_summary"]
+    lines.append(
+        f"- 尝试次数：{summary['total']}；其中可重试：{summary['retried']}；"
+        f"累计等待：{summary['waited_seconds']} 秒"
+    )
+    if summary["outcomes"]:
+        rendered = "，".join(
+            f"{key}={value}" for key, value in sorted(summary["outcomes"].items())
+        )
+        lines.append(f"- 结果分布：{rendered}")
+    if summary["last_due_at"]:
+        lines.append(f"- 最近重试截止：`{summary['last_due_at']}`")
+    if report["attempts"]:
+        lines.extend(
+            [
+                "",
+                "| # | 目标页 | 结果 | HTTP | Retry-After | 等待(秒) | 截止时间 |",
+                "| ---: | ---: | --- | ---: | --- | ---: | --- |",
+            ]
+        )
+        for item in report["attempts"]:
+            lines.append(
+                f"| {item['attempt_number']} | {item['page_target']} | "
+                f"{_md(item['outcome'])} | {item['http_status'] or ''} | "
+                f"{_md(item['retry_after'] or '')} | "
+                f"{item['wait_seconds'] if item['wait_seconds'] is not None else ''} | "
+                f"{_md(item['due_at'] or '')} |"
+            )
+    else:
+        lines.append("无。")
     lines.extend(["", "## 错误", ""])
     if report["errors"]:
         lines.extend(

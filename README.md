@@ -63,7 +63,7 @@ PYTHONPATH=src python -m metaharvest report --config configs/harvest_demo.yml --
 | 命令 | 用途 |
 | --- | --- |
 | `mock` | 启动内置 OAI-PMH 仓储，只允许配置绑定 loopback |
-| `harvest` | 执行一次收割；支持 `--from`、`--until`、`--set`、`--metadata-prefix`、`--max-pages` |
+| `harvest` | 执行一次收割；支持 `--from`、`--until`、`--set`、`--metadata-prefix`、`--max-pages`、`--retry-policy inline\|deferred` |
 | `harvest --resume RUN_ID` | 从台账中的 resumptionToken 断点续采 |
 | `report` | 生成可复核报告；`--format json csv markdown` |
 | `status` | 查看最近收割运行 |
@@ -78,6 +78,49 @@ PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml -
 ```
 
 续采沿用运行记录中的仓储 URL、筛选条件、归档根目录和已保存的续传令牌，不接受改变筛选条件的参数。
+
+## 瞬时失败与 Retry-After
+
+OAI 分页的续传请求丢失会留下“上一页已提交、当前页未采集”的中间态。本工具把**一次**瞬时失败
+当作可恢复的运营状态处理，而不是直接让整次运行失败。
+
+- 只对幂等的 OAI GET 重试显式白名单中的状态码（`408/429/502/503/504`）以及连接超时/重置。
+  `400/401/403/404/500` 等一律不重试；**HTTP 200 的 OAI 协议错误**（如
+  `badResumptionToken`、`noRecordsMatch`）也绝不重试。
+- `Retry-After` 支持 delta 秒与 HTTP 日期两种形式；无法解析时使用
+  `retry.default_wait_seconds`。每次等待都先按 `retry.max_retry_after_seconds` 截断。
+- 重试期间不归档、不解析、不入库、不推进 checkpoint；只有最终成功的响应才会成为一页证据，
+  并只被处理一次。续传请求重放时只带 `verb` 与 `resumptionToken`，与首次请求形状一致。
+- 每次 HTTP 尝试都单独写入 `request_attempts` 表（状态、Retry-After、等待、截止时间），
+  与 `raw_responses` 的页面证据分离，并出现在报告中。
+
+两种用户可见策略（配置或 `--retry-policy`）：
+
+| 策略 | 行为 |
+| --- | --- |
+| `inline` | 服务器要求的等待仍落在 `total_wait_seconds` 内时就地休眠重试，一次批处理可无中断完成。 |
+| `deferred` | 最多只进行 `deferred_wait_seconds` 的短等待；更长的等待会持久化 `retry_not_before` 并以 `interrupted` 返回，交给调度器/运维续采。到期前 `--resume` 不发任何请求并以退出码 3 拒绝。 |
+
+同一份 `503 + Retry-After: 120`：`inline`（预算充足时）可返回 `completed` 且 12 条记录全部可见；
+`deferred` 返回 `interrupted`，只有更早的页面可见并持久化重试截止时间。这是记录集可见性与运行状态
+的真实差异，不只是等待时间长短。
+
+```yaml
+retry:
+  policy: "deferred"          # inline | deferred
+  max_attempts: 3             # 单页最多 HTTP 尝试次数
+  default_wait_seconds: 5     # 缺少/非法 Retry-After 时的回退等待
+  max_retry_after_seconds: 120  # 单次等待上限
+  total_wait_seconds: 300     # 本次调用累计等待预算
+  deferred_wait_seconds: 5    # deferred 模式下允许的最短就地等待
+```
+
+```bash
+# 强制内联重试，一次跑完
+PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml --retry-policy inline
+# deferred 中断后，到期前续采会被拒绝（退出码 3），到期后再执行同一条命令
+PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml --resume 1
+```
 
 ## 协议与数据能力
 
@@ -102,6 +145,7 @@ PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml -
 | `harvest_runs` | 每次运行的参数、状态、检查点、页数和结果计数 |
 | `records` | 按 OAI identifier 幂等保存的归一化记录和内容哈希 |
 | `raw_responses` | 每页原始 XML 的归档路径、哈希和 HTTP 状态 |
+| `request_attempts` | 每次 HTTP 尝试的结果、Retry-After、等待与截止时间（与页面证据分离） |
 | `events` | 运行、页面和记录级事件 |
 | `errors` | 按运行/记录隔离的错误，供报告复核 |
 

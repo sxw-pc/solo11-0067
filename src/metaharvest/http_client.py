@@ -11,7 +11,13 @@ from urllib.parse import urljoin, urlsplit
 
 import requests
 
-from .constants import ALLOWED_SCHEMES, LOCAL_HOSTS, MAX_RESPONSE_BYTES, REDIRECT_LIMIT
+from .constants import (
+    ALLOWED_SCHEMES,
+    LOCAL_HOSTS,
+    MAX_RESPONSE_BYTES,
+    REDIRECT_LIMIT,
+    RETRYABLE_HTTP_STATUSES,
+)
 from .oai_errors import HttpRequestError, ResponseTooLarge, SecurityViolation
 from .util import iso_z
 
@@ -43,6 +49,23 @@ def validate_local_url(url: str) -> str:
     return url
 
 
+def is_transient_network_error(exc: requests.RequestException) -> bool:
+    """Classify connection-level failures that are safe to retry for GET.
+
+    Only timeouts and connection resets/refusals qualify. Anything else (for
+    example an invalid URL, a redirect loop or a TLS configuration error) is
+    treated as final. ``ConnectionError`` is in the allowlist because its
+    cause is by definition a connection-level failure; the request was never
+    answered, so replaying the same GET cannot double-process a page.
+    """
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    chain = exc.__cause__ or exc.__context__
+    return isinstance(
+        chain, (TimeoutError, ConnectionError, ConnectionResetError, BrokenPipeError)
+    )
+
+
 class AuditLogger:
     """Append-only JSON Lines audit trail for every request attempt."""
 
@@ -59,6 +82,7 @@ class AuditLogger:
         host: str | None = None,
         reason: str = "",
         status_code: int | None = None,
+        retry_after: str | None = None,
     ) -> None:
         entry = {
             "timestamp": iso_z(),
@@ -68,6 +92,8 @@ class AuditLogger:
             "reason": reason,
             "status_code": status_code,
         }
+        if retry_after is not None:
+            entry["retry_after"] = retry_after
         line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
         with self._lock:
             with self.path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -136,7 +162,10 @@ class HTTPClient:
                     "network_error", current_url, reason=str(exc), host=parts.hostname
                 )
                 raise HttpRequestError(
-                    f"访问本机仓储失败: {exc}", url=current_url
+                    f"访问本机仓储失败: {exc}",
+                    url=current_url,
+                    params=current_params,
+                    retryable=is_transient_network_error(exc),
                 ) from exc
 
             try:
@@ -185,17 +214,23 @@ class HTTPClient:
                 content = self._read_limited(response, current_url)
                 headers = {key.lower(): value for key, value in response.headers.items()}
                 if response.status_code >= 400:
+                    retryable = response.status_code in RETRYABLE_HTTP_STATUSES
+                    retry_after = headers.get("retry-after")
                     self.audit.record(
                         "http_error",
                         response.url or current_url,
                         host=parts.hostname,
                         reason=f"HTTP {response.status_code}",
                         status_code=response.status_code,
+                        retry_after=retry_after,
                     )
                     raise HttpRequestError(
                         f"HTTP {response.status_code}",
                         url=response.url or current_url,
                         status_code=response.status_code,
+                        headers=headers,
+                        params=current_params,
+                        retryable=retryable,
                     )
                 self.audit.record(
                     "success",

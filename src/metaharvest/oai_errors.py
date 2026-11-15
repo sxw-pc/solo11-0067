@@ -21,12 +21,30 @@ class SecurityViolation(MetaHarvestError):
 
 
 class HttpRequestError(MetaHarvestError):
-    """An HTTP exchange failed before a valid OAI response was obtained."""
+    """An HTTP exchange failed before a valid OAI response was obtained.
 
-    def __init__(self, message: str, *, url: str, status_code: int | None = None) -> None:
+    ``headers``, ``params`` and ``retryable`` carry the evidence the retry
+    layer needs: the server's ``Retry-After`` header, the exact request shape
+    that was sent (including a resumption token), and whether the failure was
+    classified as transient.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        url: str,
+        status_code: int | None = None,
+        headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+        retryable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.url = url
         self.status_code = status_code
+        self.headers = dict(headers or {})
+        self.params = dict(params or {})
+        self.retryable = retryable
 
 
 class ResponseTooLarge(HttpRequestError):

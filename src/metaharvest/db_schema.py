@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS harvest_runs (
@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS harvest_runs (
     unchanged_count INTEGER NOT NULL DEFAULT 0,
     deleted_count INTEGER NOT NULL DEFAULT 0,
     error_count INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT
+    last_error TEXT,
+    retry_policy TEXT,
+    retry_not_before TEXT,
+    interrupted_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS raw_responses (
@@ -96,6 +99,28 @@ CREATE TABLE IF NOT EXISTS errors (
     FOREIGN KEY (run_id) REFERENCES harvest_runs(id) ON DELETE CASCADE
 );
 
+-- One row per HTTP attempt, kept separate from raw_responses so a transient
+-- failure never masquerades as archived OAI page evidence.
+CREATE TABLE IF NOT EXISTS request_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    request_url TEXT NOT NULL,
+    verb TEXT NOT NULL,
+    request_params TEXT NOT NULL,
+    page_target INTEGER NOT NULL,
+    attempted_at TEXT NOT NULL,
+    finished_at TEXT,
+    outcome TEXT NOT NULL,
+    retryable INTEGER NOT NULL DEFAULT 0 CHECK (retryable IN (0, 1)),
+    http_status INTEGER,
+    retry_after TEXT,
+    wait_seconds REAL,
+    due_at TEXT,
+    reason TEXT,
+    FOREIGN KEY (run_id) REFERENCES harvest_runs(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_started_at
     ON harvest_runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_responses_run
@@ -106,4 +131,6 @@ CREATE INDEX IF NOT EXISTS idx_events_run
     ON events(run_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_errors_run
     ON errors(run_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_attempts_run
+    ON request_attempts(run_id, id);
 """
