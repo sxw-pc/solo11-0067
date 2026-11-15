@@ -7,7 +7,8 @@
 
 ```
 协议请求 → 分页/续传令牌 → 原始 XML 留档 → 安全解析 → Dublin Core 归一化
-        → SQLite 幂等入库 → 收割台账/错误事件 → JSON/CSV/Markdown 报告
+        → SQLite 幂等入库 + 不可变版本历史 → 收割台账/错误事件 → JSON/CSV/Markdown 报告
+        → 按运行重建完整快照
 ```
 
 ## 快速开始
@@ -39,9 +40,11 @@ PYTHONPATH=src python -m metaharvest mock --config configs/mock_repo.yml
 # 终端 2：全量收割
 PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml
 
-# 查看台账 / 生成报告
+# 查看台账 / 生成报告 / 导出某次运行的完整快照
 PYTHONPATH=src python -m metaharvest status --config configs/harvest_demo.yml
 PYTHONPATH=src python -m metaharvest report --config configs/harvest_demo.yml --run-id 1
+PYTHONPATH=src python -m metaharvest snapshot --config configs/harvest_demo.yml --run-id 1
+PYTHONPATH=src python -m metaharvest snapshot --config configs/harvest_demo.yml --run-id 1 --view changes
 ```
 
 默认状态库、XML 归档、报告和审计日志分别位于 `var/metaharvest.sqlite3`、
@@ -66,6 +69,7 @@ PYTHONPATH=src python -m metaharvest report --config configs/harvest_demo.yml --
 | `harvest` | 执行一次收割；支持 `--from`、`--until`、`--set`、`--metadata-prefix`、`--max-pages` |
 | `harvest --resume RUN_ID` | 从台账中的 resumptionToken 断点续采 |
 | `report` | 生成可复核报告；`--format json csv markdown` |
+| `snapshot` | 导出某次运行结束时的完整快照（`--view snapshot`）或该次变更清单（`--view changes`） |
 | `status` | 查看最近收割运行 |
 | `demo` | 启动 mock、两轮增量语义演示、报告全流程 |
 
@@ -99,14 +103,49 @@ PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml -
 
 | 表 | 作用 |
 | --- | --- |
-| `harvest_runs` | 每次运行的参数、状态、检查点、页数和结果计数 |
-| `records` | 按 OAI identifier 幂等保存的归一化记录和内容哈希 |
+| `harvest_runs` | 每次运行的参数、状态、检查点、页数和结果计数，以及快照状态/水位 |
+| `records` | 按 OAI identifier 幂等保存的**最新**归一化记录和内容哈希（缓存） |
+| `record_versions` | 不可变的**变更版本**日志：每个标识每次有效状态变化一行 |
+| `run_observations` | 每次运行实际观察到的 `(run_id, identifier)` 及其观察时的版本指针 |
 | `raw_responses` | 每页原始 XML 的归档路径、哈希和 HTTP 状态 |
 | `events` | 运行、页面和记录级事件 |
 | `errors` | 按运行/记录隔离的错误，供报告复核 |
 
 记录写入使用内容哈希对比；唯一主键为 OAI identifier。停止在 `interrupted` 的运行可通过
 `--resume` 继续，从最后保存的令牌请求下一页。
+
+## 按运行重建完整快照
+
+`records` 只保存每个标识的最新状态，`for_run` 只表示“最后一次被该运行触碰”，二者都不能代表
+某次采集结束时的仓库全貌。为此项目选择**不可变版本日志 + 运行水位重建**，而不是为每个运行
+物化一份全量快照：
+
+- **写入**：记录的有效状态（含删除墓碑）发生变化时，才向 `record_versions` 追加一行；未变记录
+  不复制内容，只在 `run_observations` 写一条小索引并固定当时可见的版本。
+- **水位**：运行创建时记录 `snapshot_base_watermark`，进入终态时冻结
+  `snapshot_watermark`/`snapshot_frozen_at`。运行快照 = 基础水位内的最新版本，再按
+  `run_observations` 覆盖为该运行实际看到的版本。
+- **首次基线**：第一条被观察到的标识记为 `created`（删除标记记为 `deleted`）；迁移旧库时为
+  每个幸存 `records` 行补一条 `baseline`。
+- **增量变更**：未变记录不写新版本，但在快照中继承最近一次更早版本；变更清单只含真正改变
+  有效状态的记录。
+- **删除墓碑**：删除记为 `is_deleted=1` 的墓碑版本。旧版本永久保留，可通过
+  `versions_for_identifier` 追溯；快照显示墓碑为当时有效状态。
+- **中断续采**：`interrupted`/`failed` 运行的快照状态为 `partial`，**不**标记为完整快照；
+  `running` 运行只提供明确非完整的实时视图。
+- **重试同一 checkpoint 页**：`record_versions` 上的 `UNIQUE(run_id, identifier)` 与
+  `run_observations` 的主键保证同一运行对同一标识至多一条历史，不会重复。
+- **不漂移**：快照只读取水位内或运行自身固定过的不可变版本，未来运行无法改写它；同一
+  `run_id` 的查询结果与查询时间无关。
+- **不可重建的旧历史**：v1 数据库升级后，无法证明完整的已完成运行标记为 `incomplete`，返回
+  空记录集而不是伪造状态。
+
+存储增长与实际变更次数成正比（外加每个观察一条小索引）；读取成本是每次快照一次按标识分组的
+索引扫描，比“每个已完成运行复制全量记录”更省空间。
+
+`snapshot` 命令与报告都区分两种视图：`snapshot`（完整有效版本集，含墓碑）和 `changes`
+（单次变更清单）。JSON 报告中的 `records`/`changes`、CSV 的 `harvest-run-*.csv`/
+`harvest-run-*-changes.csv`、Markdown 的两个小节分别对应二者。
 
 ## 安全边界
 
@@ -129,8 +168,9 @@ PYTHONPATH=src python -m pytest
 ```
 
 测试覆盖配置解析、mock 协议与分页、协议错误、续传令牌篡改、XXE 拒绝、URL 白名单、审计日志、
-Dublin Core 归一化、幂等入库、增量筛选、断点续采、报告完整性校验、CLI 和完整 demo 流程。
-全部测试只访问进程内的 loopback mock。
+Dublin Core 归一化、幂等入库、增量筛选、断点续采、报告完整性校验、CLI 和完整 demo 流程，
+以及连续增量运行的快照隔离、未变记录继承、删除墓碑、失败/中断续采、checkpoint 页重试和
+v1 数据库升级。全部测试只访问进程内的 loopback mock。
 
 ## 目录
 

@@ -75,19 +75,39 @@ def _verify_evidence(run: dict[str, Any], raw_responses: list[dict[str, Any]]) -
 
 
 def build_report(db: Database, run_id: int) -> dict[str, Any]:
+    """Assemble a report with two clearly separated read models.
+
+    ``records`` is the *complete snapshot* reconstructed at this run's frozen
+    watermark: the effective version of every identifier known when the run
+    ended, including tombstones.  ``changes`` is the *single-run change list*:
+    only identifiers whose effective state changed during this run.  Unchanged
+    records appear in ``records`` but never in ``changes``.
+    """
     run = db.get_run(run_id)
     if run is None:
         raise ReportError(f"收割运行不存在: {run_id}")
     raw_responses = db.raw_responses_for_run(run_id)
-    records = db.records.for_run(run_id)
+    snapshot = db.snapshot_for_run(run_id)
+    assert snapshot is not None  # the run exists, checked above
+    changes = db.changes_for_run(run_id)
     errors = db.errors_for_run(run_id)
     events = db.events_for_run(run_id)
     integrity = _verify_evidence(run, raw_responses)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": iso_z(),
         "run": run,
-        "records": records,
+        "view": {
+            "snapshot_status": snapshot.status,
+            "complete": snapshot.complete,
+            "watermark": snapshot.watermark,
+            "frozen_at": snapshot.frozen_at,
+            "snapshot_record_count": snapshot.record_count,
+            "snapshot_deleted_count": snapshot.deleted_count,
+            "changed_record_count": len(changes),
+        },
+        "records": list(snapshot.records),
+        "changes": changes,
         "raw_responses": raw_responses,
         "errors": errors,
         "events": events,
@@ -95,7 +115,12 @@ def build_report(db: Database, run_id: int) -> dict[str, Any]:
     }
 
 
-def _csv_text(records: Iterable[dict[str, Any]]) -> str:
+def _csv_text(
+    records: Iterable[dict[str, Any]],
+    *,
+    include_outcome: bool = False,
+    include_version: bool = False,
+) -> str:
     columns = [
         "identifier",
         "datestamp",
@@ -110,6 +135,10 @@ def _csv_text(records: Iterable[dict[str, Any]]) -> str:
         "rights",
         "record_hash",
     ]
+    if include_outcome:
+        columns.insert(1, "outcome")
+    if include_version:
+        columns.extend(["version_run_id", "version_seq", "changed_in_run"])
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
     writer.writeheader()
@@ -118,6 +147,8 @@ def _csv_text(records: Iterable[dict[str, Any]]) -> str:
         for key in ("creators", "subjects"):
             row[key] = "; ".join(row.get(key) or [])
         row["deleted"] = "true" if row.get("deleted") else "false"
+        if include_version:
+            row["changed_in_run"] = "true" if row.get("changed_in_run") else "false"
         writer.writerow(row)
     return buffer.getvalue()
 
@@ -128,19 +159,34 @@ def _md(value: Any) -> str:
 
 def _markdown(report: dict[str, Any]) -> str:
     run = report["run"]
+    view = report["view"]
     counts = [
         ("页数", run["page_count"]),
-        ("记录数", run["record_count"]),
+        ("本运行观察记录数", run["record_count"]),
         ("新建", run["created_count"]),
         ("更新", run["updated_count"]),
         ("未变", run["unchanged_count"]),
         ("删除", run["deleted_count"]),
         ("错误", run["error_count"]),
     ]
+    if view["complete"]:
+        snapshot_line = "完整快照（运行已完成）"
+    elif view["snapshot_status"] == "partial":
+        snapshot_line = "部分快照（运行中断或失败，不构成完整仓库状态）"
+    elif view["snapshot_status"] == "incomplete":
+        snapshot_line = "历史不完整（旧数据库缺少版本历史，无法重建该运行）"
+    else:
+        snapshot_line = "无快照（运行尚未结束或早于版本历史）"
     lines = [
         f"# 元仓收割报告 · 运行 #{run['id']}",
         "",
         f"- 状态：`{run['status']}`",
+        f"- 快照视图：{snapshot_line}",
+        f"- 快照水位：`{view['watermark'] if view['watermark'] is not None else '(无)'}`",
+        f"- 快照冻结时间：`{view['frozen_at'] or '(未冻结)'}`",
+        f"- 完整快照记录数：{view['snapshot_record_count']}"
+        f"（其中墓碑 {view['snapshot_deleted_count']}）",
+        f"- 本次变更记录数：{view['changed_record_count']}",
         f"- 仓储：`{run['repository_url']}`",
         f"- 元数据格式：`{run['metadata_prefix']}`",
         f"- Set：`{run['set_spec'] or '(全部)'}`",
@@ -188,21 +234,52 @@ def _markdown(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## 记录",
+            "## 本次变更清单",
             "",
-            "| OAI 标识 | 数据时间 | 删除 | 标题 | 内容哈希 |",
-            "| --- | --- | --- | --- | --- |",
+            "仅列出本运行实际改变的有效状态；未变记录不会出现在这里。",
+            "",
+            "| OAI 标识 | 结果 | 数据时间 | 删除 | 标题 | 内容哈希 |",
+            "| --- | --- | --- | --- | --- | --- |",
         ]
     )
-    for record in report["records"]:
-        lines.append(
-            f"| `{_md(record['identifier'])}` | {record['datestamp']} | "
-            f"{'是' if record['deleted'] else '否'} | {_md(record['title'] or '(无题名)')} | "
-            f"`{record['record_hash'][:16]}…` |"
-        )
+    if report["changes"]:
+        for record in report["changes"]:
+            lines.append(
+                f"| `{_md(record['identifier'])}` | {record.get('outcome', '')} | "
+                f"{record['datestamp']} | {'是' if record['deleted'] else '否'} | "
+                f"{_md(record['title'] or '(无题名)')} | "
+                f"`{record['record_hash'][:16]}…` |"
+            )
+    else:
+        lines.append("| — | 无变更 | — | — | — | — |")
     lines.extend(
         [
             "",
+            f"## 完整快照（水位 `{view['watermark']}`）",
+            "",
+            "每个标识在该运行结束时的有效版本；未变记录继承最近一次更早版本。",
+            "",
+            "| OAI 标识 | 数据时间 | 删除 | 标题 | 内容哈希 | 版本运行 |",
+            "| --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if report["records"]:
+        for record in report["records"]:
+            marker = "*" if record.get("changed_in_run") else ""
+            lines.append(
+                f"| `{_md(record['identifier'])}{marker}` | {record['datestamp']} | "
+                f"{'是' if record['deleted'] else '否'} | "
+                f"{_md(record['title'] or '(无题名)')} | "
+                f"`{record['record_hash'][:16]}…` | {record['version_run_id']} |"
+            )
+    elif view["complete"]:
+        lines.append("| — | — | — | （本次快照为空） | — | — |")
+    else:
+        lines.append("| — | — | — | （该运行没有可重建的完整快照） | — | — |")
+    lines.extend(
+        [
+            "",
+            "> `*` 表示该记录的有效状态在本运行中发生变化；其余记录继承自更早版本。",
             "> 本报告由本地归档的原始 OAI-PMH XML 支撑；SHA-256 校验失败时不应采信本次收割结果。",
             "",
         ]
@@ -233,9 +310,16 @@ def write_reports(
         )
         files["json"] = path
     if "csv" in requested:
+        # The CSV mirrors the complete snapshot; the change list gets its own
+        # file so consumers cannot mistake one for the other.
         path = root / f"{stem}.csv"
-        atomic_write_text(path, _csv_text(report["records"]))
+        atomic_write_text(path, _csv_text(report["records"], include_version=True))
         files["csv"] = path
+        changes_path = root / f"{stem}-changes.csv"
+        atomic_write_text(
+            changes_path, _csv_text(report["changes"], include_outcome=True)
+        )
+        files["changes_csv"] = changes_path
     if "markdown" in requested:
         path = root / f"{stem}.md"
         atomic_write_text(path, _markdown(report))

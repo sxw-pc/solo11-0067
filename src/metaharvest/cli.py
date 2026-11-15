@@ -75,6 +75,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     report.set_defaults(handler=_cmd_report)
 
+    snapshot = sub.add_parser(
+        "snapshot", help="导出某次运行结束时的完整记录快照或单次变更清单"
+    )
+    snapshot.add_argument("--config", type=Path, default=DEFAULT_HARVEST_CONFIG)
+    snapshot.add_argument("--db", type=Path)
+    snapshot.add_argument("--run-id", type=int)
+    snapshot.add_argument(
+        "--view",
+        choices=["snapshot", "changes"],
+        default="snapshot",
+        help="snapshot=完整快照（默认），changes=该次运行的变更清单",
+    )
+    snapshot.add_argument("--output", type=Path, help="写入 JSON 文件；省略则打印到 stdout")
+    snapshot.set_defaults(handler=_cmd_snapshot)
+
     status = sub.add_parser("status", help="查看收割运行台账")
     status.add_argument("--config", type=Path, default=DEFAULT_HARVEST_CONFIG)
     status.add_argument("--db", type=Path)
@@ -186,6 +201,59 @@ def _cmd_report(args: argparse.Namespace) -> int:
     )
     _emit(output.as_dict())
     return 0 if output.integrity["status"] == "ok" else 1
+
+
+def _cmd_snapshot(args: argparse.Namespace) -> int:
+    config = _storage_overrides(load_harvest_config(args.config), args)
+    db = Database(config.storage.db_path)
+    run = db.get_run(args.run_id) if args.run_id is not None else db.latest_run()
+    if args.run_id is not None and run is None:
+        raise MetaHarvestError(f"收割运行不存在: {args.run_id}")
+    if run is None:
+        raise MetaHarvestError("台账中还没有收割运行")
+    run_id = int(run["id"])
+
+    if args.view == "changes":
+        records = db.changes_for_run(run_id)
+        payload = {
+            "run_id": run_id,
+            "view": "changes",
+            "description": "该次运行实际改变了有效状态的记录；未变记录不在其中",
+            "record_count": len(records),
+            "records": records,
+        }
+        code = 0
+    else:
+        snapshot = db.snapshot_for_run(run_id)
+        assert snapshot is not None
+        payload = {
+            "run_id": run_id,
+            "view": "snapshot",
+            "description": "该次运行冻结水位的完整有效版本集，含删除墓碑",
+            **snapshot.as_dict(),
+        }
+        # A snapshot that is not provably complete is never reported as success.
+        code = 0 if snapshot.complete else 1
+
+    if args.output:
+        from .util import atomic_write_text
+
+        atomic_write_text(
+            args.output.expanduser().resolve(),
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n",
+        )
+        _emit(
+            {
+                "run_id": run_id,
+                "view": payload["view"],
+                "output": str(args.output.expanduser().resolve()),
+                "record_count": payload["record_count"],
+                "complete": payload.get("complete"),
+            }
+        )
+    else:
+        _emit(payload)
+    return code
 
 
 def _cmd_status(args: argparse.Namespace) -> int:

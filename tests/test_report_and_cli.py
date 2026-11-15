@@ -18,7 +18,7 @@ def test_reports_include_integrity_and_detect_tampering(harvest_config_factory):
     result = Harvester(config).start()
     db = Database(config.storage.db_path)
     output = write_reports(db, result.run_id, config.storage.report_dir)
-    assert set(output.files) == {"json", "csv", "markdown"}
+    assert set(output.files) == {"json", "csv", "changes_csv", "markdown"}
     assert output.integrity["status"] == "ok"
     assert output.integrity["checked_files"] == 3
 
@@ -26,7 +26,14 @@ def test_reports_include_integrity_and_detect_tampering(harvest_config_factory):
     assert payload["run"]["id"] == result.run_id
     assert len(payload["records"]) == 12
     assert payload["integrity"]["status"] == "ok"
+    # A full harvest changes every record, so the change list matches here.
+    assert len(payload["changes"]) == 12
+    assert payload["view"]["complete"] is True
+    assert payload["view"]["snapshot_status"] == "complete"
+    assert payload["view"]["snapshot_record_count"] == 12
     assert "原始响应完整性" in output.files["markdown"].read_text(encoding="utf-8")
+    assert "完整快照" in output.files["markdown"].read_text(encoding="utf-8")
+    assert "本次变更清单" in output.files["markdown"].read_text(encoding="utf-8")
 
     rows = list(
         csv.DictReader(io.StringIO(output.files["csv"].read_text(encoding="utf-8")))
@@ -34,6 +41,13 @@ def test_reports_include_integrity_and_detect_tampering(harvest_config_factory):
     assert len(rows) == 12
     assert rows[0]["identifier"].startswith("oai:demo.invalid:")
     assert rows[0]["creators"]
+    change_rows = list(
+        csv.DictReader(
+            io.StringIO(output.files["changes_csv"].read_text(encoding="utf-8"))
+        )
+    )
+    assert len(change_rows) == 12
+    assert "outcome" in change_rows[0]
 
     raw = db.raw_responses_for_run(result.run_id)[0]
     evidence = config.storage.archive_dir / raw["archive_path"]

@@ -175,7 +175,12 @@ def test_duplicate_arguments_and_tampered_token(api_client):
     )
     token = parse_record_page(first.root).token
     assert token is not None
-    tampered = token.value[:-1] + ("A" if token.value[-1] != "A" else "B")
+    # Flip a character in the payload segment (not the trailing padding
+    # position, which base64 may decode identically).  The signature no longer
+    # matches, so the token must be rejected.
+    payload_segment, signature_segment = token.value.split(".", 1)
+    flipped = "A" if payload_segment[0] != "A" else "B"
+    tampered = f"{flipped}{payload_segment[1:]}.{signature_segment}"
     expect_error(
         get_bytes(
             api_client,

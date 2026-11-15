@@ -29,6 +29,9 @@ class HarvestResult:
     deleted_count: int
     error_count: int
     checkpoint_token: str | None
+    snapshot_status: str = "none"
+    snapshot_complete: bool = False
+    snapshot_watermark: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -42,6 +45,9 @@ class HarvestResult:
             "deleted_count": self.deleted_count,
             "error_count": self.error_count,
             "checkpoint_token": self.checkpoint_token,
+            "snapshot_status": self.snapshot_status,
+            "snapshot_complete": self.snapshot_complete,
+            "snapshot_watermark": self.snapshot_watermark,
         }
 
 
@@ -57,6 +63,9 @@ def _result_from_run(run: dict[str, Any]) -> HarvestResult:
         deleted_count=int(run["deleted_count"]),
         error_count=int(run["error_count"]),
         checkpoint_token=run["checkpoint_token"],
+        snapshot_status=str(run.get("snapshot_status") or "none"),
+        snapshot_complete=str(run.get("snapshot_status") or "none") == "complete",
+        snapshot_watermark=run.get("snapshot_watermark"),
     )
 
 
