@@ -5,3 +5,10 @@ __pycache__/
 .venv/
 build/
 var/
+venv/
+node_modules/
+*.pyc
+.coverage
+.benchmarks/
+.env
+dist/
