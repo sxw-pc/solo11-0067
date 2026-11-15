@@ -14,6 +14,12 @@ from .oai_client import OAIClient, OAIResponse
 from .oai_errors import HarvestError, OAIProtocolError
 from .page_processor import process_page
 from .parser import parse_oai_response, parse_record_page
+from .set_catalog import (
+    ADMISSION_NOT_APPLICABLE,
+    AdmissionDecision,
+    SetCatalog,
+    catalog_snapshot_for_run,
+)
 from .util import hash_payload
 
 
@@ -29,6 +35,10 @@ class HarvestResult:
     deleted_count: int
     error_count: int
     checkpoint_token: str | None
+    set_catalog_generation: int | None = None
+    set_catalog_status: str | None = None
+    set_catalog_set_name: str | None = None
+    set_catalog_set_description: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -42,6 +52,12 @@ class HarvestResult:
             "deleted_count": self.deleted_count,
             "error_count": self.error_count,
             "checkpoint_token": self.checkpoint_token,
+            "set_catalog": {
+                "generation": self.set_catalog_generation,
+                "status": self.set_catalog_status,
+                "set_name": self.set_catalog_set_name,
+                "set_description": self.set_catalog_set_description,
+            },
         }
 
 
@@ -57,6 +73,10 @@ def _result_from_run(run: dict[str, Any]) -> HarvestResult:
         deleted_count=int(run["deleted_count"]),
         error_count=int(run["error_count"]),
         checkpoint_token=run["checkpoint_token"],
+        set_catalog_generation=run.get("set_catalog_generation"),
+        set_catalog_status=run.get("set_catalog_status"),
+        set_catalog_set_name=run.get("set_catalog_set_name"),
+        set_catalog_set_description=run.get("set_catalog_set_description"),
     )
 
 
@@ -81,9 +101,59 @@ class Harvester:
         self._client_injected = client is not None
         self._archive_injected = archive is not None
 
-    def start(self, *, max_pages: int | None = None) -> HarvestResult:
+    def admit_set(
+        self,
+        *,
+        set_spec: str | None = None,
+        allow_unverified: bool = False,
+        pinned_set_name: str | None = None,
+        pinned_set_description: str | None = None,
+        pinned_set_version: str | None = None,
+    ) -> AdmissionDecision:
+        """Validate a set filter against this repository's catalog.
+
+        Raises ``SetAdmissionError`` when the catalog is missing, the set is
+        absent, or a conflicting set was not pinned to one description.
+        """
+        repo = self.config.repository
+        requested = repo.set_spec if set_spec is None else set_spec
+        if requested is None:
+            return AdmissionDecision(
+                set_spec=None,
+                repository_url=repo.base_url,
+                status=ADMISSION_NOT_APPLICABLE,
+                reason="未指定 set，按仓储全量采集",
+            )
+        catalog = SetCatalog(
+            self.db,
+            self.client,
+            conflict_policy=self.config.set_catalog_conflict_policy,
+        )
+        return catalog.admit(
+            repo.base_url,
+            requested,
+            pinned_set_name=pinned_set_name,
+            pinned_description=pinned_set_description,
+            pinned_version_id=pinned_set_version,
+            allow_unverified=allow_unverified,
+        )
+
+    def start(
+        self,
+        *,
+        max_pages: int | None = None,
+        admission: AdmissionDecision | None = None,
+        allow_unverified_set: bool = False,
+    ) -> HarvestResult:
         pages_limit = self._page_limit(max_pages)
         repo = self.config.repository
+        if admission is None and repo.set_spec is not None:
+            # Enforce catalog admission for every caller, not just the CLI.
+            # When verification is disabled the decision is still recorded,
+            # explicitly marked unverified rather than silently omitted.
+            admission = self.admit_set(
+                allow_unverified=allow_unverified_set or not self.config.verify_sets
+            )
         config_hash = hash_payload(
             {
                 "base_url": repo.base_url,
@@ -91,7 +161,15 @@ class Harvester:
                 "set_spec": repo.set_spec,
                 "from_date": repo.from_date,
                 "until_date": repo.until_date,
+                "set_catalog_version": (
+                    admission.version_id if admission is not None else None
+                ),
             }
+        )
+        snapshot = (
+            catalog_snapshot_for_run(admission)
+            if admission is not None
+            else {}
         )
         run_id = self.db.create_run(
             repository_url=repo.base_url,
@@ -101,6 +179,7 @@ class Harvester:
             until_date=repo.until_date,
             archive_root=self.archive.root,
             config_hash=config_hash,
+            **snapshot,
         )
         self.db.add_event(
             run_id,
@@ -112,6 +191,7 @@ class Harvester:
                 "from_date": repo.from_date,
                 "until_date": repo.until_date,
                 "max_pages": pages_limit,
+                "set_catalog": admission.as_dict() if admission is not None else None,
             },
         )
         run = self.db.get_run(run_id)

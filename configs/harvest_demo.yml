@@ -11,6 +11,12 @@ http:
 
 harvest:
   max_pages: null
+  set_catalog:
+    # strict: 任一 set 身份冲突则整代不激活，保留旧 active 目录
+    # active: 激活目录代，冲突 set 隔离，其他 set 立即可用
+    conflict_policy: "strict"
+    # false 时 harvest --set 不要求目录准入（仍会在 run 中记录未验证）
+    verify_sets: true
 
 storage:
   db_path: "../var/metaharvest.sqlite3"

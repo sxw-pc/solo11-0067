@@ -59,6 +59,14 @@ class HarvestError(MetaHarvestError):
         self.run_id = run_id
 
 
+class SetCatalogError(MetaHarvestError):
+    """The repository set catalog could not be fetched or published."""
+
+
+class SetAdmissionError(MetaHarvestError):
+    """A requested set may not be used for a new harvest run."""
+
+
 class ArchiveError(MetaHarvestError):
     """Raw response evidence could not be stored or resolved safely."""
 

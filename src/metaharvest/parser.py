@@ -57,6 +57,19 @@ class OAIEnvelope:
     root: object
 
 
+@dataclass(frozen=True)
+class ParsedSet:
+    spec: str
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
+class ListSetsPage:
+    sets: tuple[ParsedSet, ...]
+    token: ResumptionToken | None
+
+
 def parse_xml(content: bytes) -> object:
     if not content or not content.strip():
         raise XMLParseError("响应体为空")
@@ -225,19 +238,33 @@ def parse_identify(content: bytes) -> dict[str, object]:
     return result
 
 
-def parse_list_sets(content: bytes) -> tuple[dict[str, str], ...]:
+def _child_text(parent: object, local_name: str) -> str:
+    node = parent.find(q(OAI_NAMESPACE, local_name))
+    if node is None:
+        return ""
+    return collapse_ws("".join(node.itertext()))
+
+
+def parse_list_sets(content: bytes) -> ListSetsPage:
+    """Parse one ListSets page, including its resumption token.
+
+    The token is essential for catalog completeness: a page without a token is
+    the end of the enumeration, while a non-empty token means further pages
+    must be fetched before the catalog can be treated as complete.
+    """
     envelope = parse_oai_response(content)
     list_node = envelope.root.find(q(OAI_NAMESPACE, "ListSets"))
     if list_node is None:
         raise XMLParseError("响应中缺少 ListSets")
-    sets: list[dict[str, str]] = []
-    for set_node in list_node.findall(q(OAI_NAMESPACE, "set")):
-        values = {
-            child.tag.split("}", 1)[1]: collapse_ws("".join(child.itertext()))
-            for child in set_node
-        }
-        sets.append(values)
-    return tuple(sets)
+    sets = tuple(
+        ParsedSet(
+            spec=_child_text(set_node, "setSpec"),
+            name=_child_text(set_node, "setName"),
+            description=_child_text(set_node, "setDescription"),
+        )
+        for set_node in list_node.findall(q(OAI_NAMESPACE, "set"))
+    )
+    return ListSetsPage(sets=sets, token=_parse_token(list_node))
 
 
 def parse_metadata_formats(content: bytes) -> tuple[dict[str, str], ...]:
@@ -257,9 +284,11 @@ def parse_metadata_formats(content: bytes) -> tuple[dict[str, str], ...]:
 
 
 __all__ = [
+    "ListSetsPage",
     "OAI_DC_NAMESPACE",
     "OAIEnvelope",
     "ParsedRecord",
+    "ParsedSet",
     "RecordIssue",
     "RecordPage",
     "ResumptionToken",

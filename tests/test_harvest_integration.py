@@ -81,6 +81,11 @@ def test_incremental_window_and_set_filter(harvest_config_factory):
     assert result.created_count == 0
 
     theses = harvest_config_factory(set_spec="theses", until_date="2024-03-31")
+    from metaharvest.set_catalog import SetCatalog, resolve_catalog_client
+
+    SetCatalog(
+        Database(theses.storage.db_path), resolve_catalog_client(theses)
+    ).refresh()
     subset = Harvester(theses).start()
     assert subset.record_count == 2
     assert subset.status == "completed"

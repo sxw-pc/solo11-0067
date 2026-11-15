@@ -89,7 +89,7 @@ def test_identify_formats_and_sets(api_client):
     assert formats[0]["metadataPrefix"] == "oai_dc"
 
     sets = parse_list_sets(get_bytes(api_client, verb="ListSets"))
-    assert {entry["setSpec"] for entry in sets} == {"theses", "articles", "datasets"}
+    assert {entry.spec for entry in sets.sets} == {"theses", "articles", "datasets"}
 
 
 def test_pagination_and_deleted_header(api_client):
@@ -175,7 +175,10 @@ def test_duplicate_arguments_and_tampered_token(api_client):
     )
     token = parse_record_page(first.root).token
     assert token is not None
-    tampered = token.value[:-1] + ("A" if token.value[-1] != "A" else "B")
+    # Appending a character changes the base64 payload length, so the decoded
+    # signature bytes always differ (flipping the last character can leave the
+    # decoded bytes unchanged because of base64 padding bits).
+    tampered = token.value + "A"
     expect_error(
         get_bytes(
             api_client,

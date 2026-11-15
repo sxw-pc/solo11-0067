@@ -147,13 +147,31 @@ def build_metadata_formats(base_url: str, params: dict[str, str]) -> bytes:
     return serialize(root)
 
 
-def build_sets(base_url: str, params: dict[str, str], sets: tuple[SeedSet, ...]) -> bytes:
+def build_sets(
+    base_url: str,
+    params: dict[str, str],
+    sets: tuple[SeedSet, ...],
+    token: TokenDisplay | None = None,
+) -> bytes:
     root = _new_response(base_url, params)
     parent = ET.SubElement(root, q(OAI_NAMESPACE, "ListSets"))
     for entry in sets:
         set_node = ET.SubElement(parent, q(OAI_NAMESPACE, "set"))
         ET.SubElement(set_node, q(OAI_NAMESPACE, "setSpec")).text = entry.spec
         ET.SubElement(set_node, q(OAI_NAMESPACE, "setName")).text = entry.name
+        if entry.description:
+            ET.SubElement(
+                set_node, q(OAI_NAMESPACE, "setDescription")
+            ).text = entry.description
+    if token is not None:
+        token_node = ET.SubElement(parent, q(OAI_NAMESPACE, "resumptionToken"))
+        if token.expiration_date:
+            token_node.set("expirationDate", token.expiration_date)
+        if token.cursor is not None:
+            token_node.set("cursor", str(token.cursor))
+        if token.complete_size is not None:
+            token_node.set("completeListSize", str(token.complete_size))
+        token_node.text = token.value
     return serialize(root)
 
 

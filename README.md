@@ -63,6 +63,8 @@ PYTHONPATH=src python -m metaharvest report --config configs/harvest_demo.yml --
 | 命令 | 用途 |
 | --- | --- |
 | `mock` | 启动内置 OAI-PMH 仓储，只允许配置绑定 loopback |
+| `catalog refresh` | 分页抓取完整 `ListSets`，发布新的仓储集合目录代 |
+| `catalog show` | 查看 active 目录代、成员状态与逐页证据 |
 | `harvest` | 执行一次收割；支持 `--from`、`--until`、`--set`、`--metadata-prefix`、`--max-pages` |
 | `harvest --resume RUN_ID` | 从台账中的 resumptionToken 断点续采 |
 | `report` | 生成可复核报告；`--format json csv markdown` |
@@ -79,13 +81,51 @@ PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml -
 
 续采沿用运行记录中的仓储 URL、筛选条件、归档根目录和已保存的续传令牌，不接受改变筛选条件的参数。
 
+## 集合目录与采集准入
+
+`--set` 会作为 OAI-PMH `ListRecords` 的 `set` 过滤条件，决定一次运行实际能写入哪些记录。
+但 `ListRecords` 对不存在的 set 通常只返回 `noRecordsMatch`，与“合法但为空的日期范围”无法区分。
+因此本工具按**仓储身份**（OAI endpoint URL）维护集合目录，并在创建 run 之前做准入：
+
+```bash
+# 1) 先抓取完整目录（自动跟随 resumptionToken，所有分页成功后才发布新代）
+PYTHONPATH=src python -m metaharvest catalog refresh --config configs/harvest_demo.yml
+PYTHONPATH=src python -m metaharvest catalog show --config configs/harvest_demo.yml
+
+# 2) 再按已发布目录中的 set 采集
+PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml --set theses
+```
+
+规则：
+
+- 目录分页**全部成功后才整代发布**。网络、XML 或协议失败不会替换上一次的 active 目录。
+- `ListSets` 返回 `noRecordsMatch` 表示“完整但为空的目录”，会发布一个 0 成员的 active 代。
+  这与 `ListRecords` 的 `noRecordsMatch`（合法的 0 记录完成运行）语义不同。
+- 每个 `setSpec` 在一个目录代里有明确状态：
+  - `available`：所有分页上的名称/说明一致，可直接用于新 run；
+  - `conflict`：同一 `setSpec` 在不同页给出不同 `setName`/`setDescription`，身份不唯一；
+  - `invalid`：`set` 元素缺少可用 `setSpec`，永不可选。
+- 目录未同步、set 不在 active 目录、或冲突 set 未固定说明版本时，`harvest --set` 会在
+  **发请求/创建 run 之前**报错退出（兼容开关见下）。
+- 同一 `setSpec` 在另一个仓储下不会通过准入；目录按 endpoint URL 隔离。
+- 冲突处理策略（`harvest.set_catalog.conflict_policy`）：
+  - `strict`（路线 A，默认）：存在冲突时整代不激活，保留旧 active 目录继续用于准入；
+  - `active`（路线 B）：激活目录代，冲突 set 隔离不可选，其他 set 立即可用；冲突 set 只有
+    显式指定 `--set-name`/`--set-description` 或 `--set-version` 固定一个说明版本后才可用。
+- 兼容开关 `--allow-unverified-set`（或 `harvest.set_catalog.verify_sets: false`）允许直接
+  透传 `--set` 而不做目录校验，但新 run 会以 `set_catalog_status = unverified` 明确标记。
+- 每个已在目录中验证的 run 保存当时的目录代、set 名称/说明/状态和说明版本哈希；即使目录后来
+  变化或该 set 被删除，旧 run 仍能解释自己的采集范围。`report` 会输出这份快照。
+
+删除的 set 会从新 run 的可选范围中消失（准入拒绝），但历史 run 的快照不受影响。
+
 ## 协议与数据能力
 
 - OAI-PMH 2.0 verbs：`Identify`、`ListMetadataFormats`、`ListSets`、`ListIdentifiers`、
   `ListRecords`、`GetRecord`。
 - 仅支持 `oai_dc`；支持 `from`、`until`、`set` 过滤和 HTTP GET/POST 请求。
-- mock 分页通过带 HMAC 签名和过期时间的 `resumptionToken` 实现，篡改、过期、跨 verb 使用均报
-  `badResumptionToken`。
+- mock 分页通过带 HMAC 签名和过期时间的 `resumptionToken` 实现（`ListSets`、`ListRecords`、
+  `ListIdentifiers`），篡改、过期、跨 verb 使用均报 `badResumptionToken`。
 - 删除记录以 `header status="deleted"` 表示，重复删除幂等。
 - 空结果返回 `noRecordsMatch`，收割器将其视为正常的 0 记录完成，并保留错误响应 XML。
 - Dublin Core 全字段归一化：标题、创建者、主题、描述、出版者、贡献者、日期、类型、格式、标识符、
@@ -99,11 +139,15 @@ PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml -
 
 | 表 | 作用 |
 | --- | --- |
-| `harvest_runs` | 每次运行的参数、状态、检查点、页数和结果计数 |
+| `harvest_runs` | 每次运行的参数、状态、检查点、页数、结果计数与目录快照 |
 | `records` | 按 OAI identifier 幂等保存的归一化记录和内容哈希 |
 | `raw_responses` | 每页原始 XML 的归档路径、哈希和 HTTP 状态 |
 | `events` | 运行、页面和记录级事件 |
 | `errors` | 按运行/记录隔离的错误，供报告复核 |
+| `set_catalog_generations` | 每个仓储的目录代（active / superseded / rejected）及汇总 |
+| `set_catalog_members` | 每代中按 `setSpec` 去重后的成员状态 |
+| `set_catalog_occurrences` | 每代中每个 set 在每一页上的原始名称/说明，作为冲突证据 |
+| `set_catalog_pages` | 目录抓取逐页的 URL、HTTP 状态与 SHA-256 |
 
 记录写入使用内容哈希对比；唯一主键为 OAI identifier。停止在 `interrupted` 的运行可通过
 `--resume` 继续，从最后保存的令牌请求下一页。
@@ -129,7 +173,9 @@ PYTHONPATH=src python -m pytest
 ```
 
 测试覆盖配置解析、mock 协议与分页、协议错误、续传令牌篡改、XXE 拒绝、URL 白名单、审计日志、
-Dublin Core 归一化、幂等入库、增量筛选、断点续采、报告完整性校验、CLI 和完整 demo 流程。
+Dublin Core 归一化、幂等入库、增量筛选、断点续采、报告完整性校验、CLI 和完整 demo 流程，
+以及集合目录的分页续传、跨页重复/冲突、层级缺父、空目录、失败保代、两路线准入、仓储隔离、
+删除后旧 run 快照和兼容绕过标记。
 全部测试只访问进程内的 loopback mock。
 
 ## 目录

@@ -17,6 +17,7 @@ from .util import as_string_list, normalize_datestamp
 class SeedSet:
     spec: str
     name: str
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -79,12 +80,13 @@ def load_seed(path: str | Path) -> SeedRepository:
             raise ConfigError("seed.sets 中的条目必须是映射")
         spec = str(entry.get("spec", "")).strip()
         name = str(entry.get("name", "")).strip()
+        description = str(entry.get("description", "")).strip()
         if not spec or not name:
             raise ConfigError("每个 set 必须有 spec 和 name")
         if spec in known_specs:
             raise ConfigError(f"重复的 set spec: {spec}")
         known_specs.add(spec)
-        sets.append(SeedSet(spec=spec, name=name))
+        sets.append(SeedSet(spec=spec, name=name, description=description))
 
     records: list[SeedRecord] = []
     raw_records = raw.get("records") or []

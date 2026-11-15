@@ -43,6 +43,8 @@ class HarvestConfig:
     http: HTTPConfig
     storage: StorageConfig
     max_pages: int | None = None
+    set_catalog_conflict_policy: str = "strict"
+    verify_sets: bool = True
 
 
 @dataclass(frozen=True)
@@ -163,6 +165,14 @@ def load_harvest_config(path: str | Path) -> HarvestConfig:
     if max_pages_raw is not None:
         max_pages = _positive_int(harvest_raw, "max_pages", 0)
 
+    catalog_raw = _mapping(harvest_raw, "set_catalog", required=False)
+    conflict_policy = _text(catalog_raw, "conflict_policy", "strict")
+    if conflict_policy not in {"strict", "active"}:
+        raise ConfigError("harvest.set_catalog.conflict_policy 必须是 strict 或 active")
+    verify_sets_raw = catalog_raw.get("verify_sets", True)
+    if not isinstance(verify_sets_raw, bool):
+        raise ConfigError("harvest.set_catalog.verify_sets 必须是布尔值")
+
     return HarvestConfig(
         repository=RepositoryConfig(
             base_url=_validate_base_url(_text(repository_raw, "base_url")),
@@ -182,6 +192,8 @@ def load_harvest_config(path: str | Path) -> HarvestConfig:
             audit_log=_path(base_dir, storage_raw, "audit_log"),
         ),
         max_pages=max_pages,
+        set_catalog_conflict_policy=conflict_policy,
+        verify_sets=verify_sets_raw,
     )
 
 

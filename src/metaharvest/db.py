@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from .db_schema import SCHEMA_SQL, SCHEMA_VERSION
+from .db_schema import RUN_CATALOG_COLUMNS, SCHEMA_SQL, SCHEMA_VERSION
 from .record_store import RecordStore
 from .util import ensure_directory, iso_z, json_loads
 
@@ -40,11 +40,29 @@ class Database:
         finally:
             connection.close()
 
+    def transaction(self) -> AbstractContextManager[sqlite3.Connection]:
+        """Public context manager for multi-statement atomic writes."""
+        return self._connect()
+
     def initialize(self) -> None:
         with self._connect() as connection:
             connection.executescript(SCHEMA_SQL)
+            self._migrate_run_catalog_columns(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.execute("PRAGMA journal_mode = WAL")
+
+    @staticmethod
+    def _migrate_run_catalog_columns(connection: sqlite3.Connection) -> None:
+        """Add catalog snapshot columns to databases created before v2."""
+        existing = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(harvest_runs)").fetchall()
+        }
+        for column, column_type in RUN_CATALOG_COLUMNS.items():
+            if column not in existing:
+                connection.execute(
+                    f"ALTER TABLE harvest_runs ADD COLUMN {column} {column_type}"
+                )
 
     def create_run(
         self,
@@ -56,14 +74,25 @@ class Database:
         until_date: str | None,
         archive_root: Path,
         config_hash: str,
+        set_catalog_generation_id: int | None = None,
+        set_catalog_generation: int | None = None,
+        set_catalog_status: str | None = None,
+        set_catalog_set_name: str | None = None,
+        set_catalog_set_description: str | None = None,
+        set_catalog_set_state: str | None = None,
+        set_catalog_version_id: str | None = None,
     ) -> int:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO harvest_runs (
                     repository_url, metadata_prefix, set_spec, from_date,
-                    until_date, archive_root, config_hash, status, started_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)
+                    until_date, archive_root, config_hash, status, started_at,
+                    set_catalog_generation_id, set_catalog_generation,
+                    set_catalog_status, set_catalog_set_name,
+                    set_catalog_set_description, set_catalog_set_state,
+                    set_catalog_version_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     repository_url,
@@ -74,6 +103,13 @@ class Database:
                     str(archive_root),
                     config_hash,
                     iso_z(),
+                    set_catalog_generation_id,
+                    set_catalog_generation,
+                    set_catalog_status,
+                    set_catalog_set_name,
+                    set_catalog_set_description,
+                    set_catalog_set_state,
+                    set_catalog_version_id,
                 ),
             )
             connection.commit()

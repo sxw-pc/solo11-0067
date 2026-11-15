@@ -28,7 +28,7 @@ LIST_VERBS = frozenset({"ListRecords", "ListIdentifiers"})
 ALLOWED_ARGS = {
     "Identify": set(),
     "ListMetadataFormats": {"identifier"},
-    "ListSets": set(),
+    "ListSets": {"resumptionToken"},
     "ListIdentifiers": {"metadataPrefix", "from", "until", "set", "resumptionToken"},
     "ListRecords": {"metadataPrefix", "from", "until", "set", "resumptionToken"},
     "GetRecord": {"identifier", "metadataPrefix"},
@@ -74,7 +74,7 @@ class MockRepository:
         if verb == "Identify":
             return build_identify(self.config, self.config.repository.earliest_datestamp)
         if verb == "ListSets":
-            return build_sets(self.base_url, params, self.seed.sets)
+            return self._list_sets(params)
         if verb == "ListMetadataFormats":
             return self._metadata_formats(params)
         if verb == "GetRecord":
@@ -88,6 +88,47 @@ class MockRepository:
         if identifier and not self._find(identifier):
             raise ProtocolFault("idDoesNotExist", f"未知 identifier: {identifier}")
         return build_metadata_formats(self.base_url, params)
+
+    def _list_sets(self, params: dict[str, str]) -> bytes:
+        sets = self.seed.sets
+        if "resumptionToken" in params:
+            payload = self.tokens.decode(params["resumptionToken"])
+            if payload.get("verb") != "ListSets":
+                raise BadResumptionToken("resumptionToken 与 verb 不匹配")
+            try:
+                offset = int(payload.get("offset", -1))
+            except (TypeError, ValueError) as exc:
+                raise BadResumptionToken("resumptionToken offset 无效") from exc
+            if offset <= 0 or offset >= len(sets):
+                raise BadResumptionToken("resumptionToken 游标越界")
+            request_params = {
+                "verb": "ListSets",
+                "resumptionToken": params["resumptionToken"],
+            }
+        else:
+            if not sets:
+                raise ProtocolFault("noRecordsMatch", "仓储没有集合")
+            offset = 0
+            request_params = dict(params)
+        page = tuple(sets[offset : offset + self.config.page_size])
+        next_offset = offset + len(page)
+        token = None
+        if next_offset < len(sets):
+            token_value = self.tokens.encode(
+                {"v": 1, "verb": "ListSets", "offset": next_offset}
+            )
+            token = TokenDisplay(
+                value=token_value,
+                expiration_date=None,
+                cursor=offset,
+                complete_size=len(sets),
+            )
+        return build_sets(
+            base_url=self.base_url,
+            params=request_params,
+            sets=page,
+            token=token,
+        )
 
     def _get_record(self, params: dict[str, str]) -> bytes:
         identifier = params.get("identifier", "").strip()

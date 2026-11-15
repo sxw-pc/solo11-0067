@@ -56,7 +56,9 @@ class OAIClient:
     def list_metadata_formats(self, identifier: str | None = None) -> OAIResponse:
         return self._fetch("ListMetadataFormats", identifier=identifier)
 
-    def list_sets(self) -> OAIResponse:
+    def list_sets(self, *, resumption_token: str | None = None) -> OAIResponse:
+        if resumption_token:
+            return self._fetch("ListSets", resumptionToken=resumption_token)
         return self._fetch("ListSets")
 
     def list_identifiers(

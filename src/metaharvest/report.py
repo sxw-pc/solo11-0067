@@ -87,6 +87,15 @@ def build_report(db: Database, run_id: int) -> dict[str, Any]:
         "schema_version": 1,
         "generated_at": iso_z(),
         "run": run,
+        "set_catalog": {
+            "generation_id": run.get("set_catalog_generation_id"),
+            "generation": run.get("set_catalog_generation"),
+            "status": run.get("set_catalog_status"),
+            "set_name": run.get("set_catalog_set_name"),
+            "set_description": run.get("set_catalog_set_description"),
+            "set_state": run.get("set_catalog_set_state"),
+            "version_id": run.get("set_catalog_version_id"),
+        },
         "records": records,
         "raw_responses": raw_responses,
         "errors": errors,
@@ -128,6 +137,7 @@ def _md(value: Any) -> str:
 
 def _markdown(report: dict[str, Any]) -> str:
     run = report["run"]
+    catalog = report.get("set_catalog") or {}
     counts = [
         ("页数", run["page_count"]),
         ("记录数", run["record_count"]),
@@ -137,6 +147,19 @@ def _markdown(report: dict[str, Any]) -> str:
         ("删除", run["deleted_count"]),
         ("错误", run["error_count"]),
     ]
+    if catalog.get("status") in {"verified", "pinned_conflict", "unverified"}:
+        catalog_line = (
+            f"- 目录准入：`{catalog.get('status')}`"
+            f"（第 {catalog.get('generation')} 代）"
+        )
+        if catalog.get("set_name") is not None:
+            catalog_line += f"；set 名称：`{catalog.get('set_name') or '(空)'}`"
+        if catalog.get("set_description"):
+            catalog_line += f"；说明：`{catalog.get('set_description')}`"
+        if catalog.get("version_id"):
+            catalog_line += f"；说明版本：`{str(catalog.get('version_id'))[:16]}…`"
+    else:
+        catalog_line = "- 目录准入：`not_applicable`（全量采集或续采）"
     lines = [
         f"# 元仓收割报告 · 运行 #{run['id']}",
         "",
@@ -145,6 +168,7 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- 元数据格式：`{run['metadata_prefix']}`",
         f"- Set：`{run['set_spec'] or '(全部)'}`",
         f"- 时间窗：`{run['from_date'] or '(无)'}` → `{run['until_date'] or '(无)'}`",
+        catalog_line,
         f"- 开始：`{run['started_at']}`",
         f"- 结束：`{run['finished_at'] or '(未结束)'}`",
         f"- 报告生成：`{report['generated_at']}`",

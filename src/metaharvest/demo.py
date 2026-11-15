@@ -11,6 +11,7 @@ from .db import Database
 from .harvester import HarvestResult, Harvester
 from .mock_runtime import running_mock
 from .report import ReportOutput, write_reports
+from .set_catalog import SetCatalog, resolve_catalog_client
 from .util import short_token, timestamp_slug
 
 
@@ -71,6 +72,8 @@ def run_demo(
             storage=storage,
             max_pages=None,
         )
+        db = Database(db_path)
+        SetCatalog(db, resolve_catalog_client(base)).refresh()
         full = Harvester(base).start()
         full_report = write_reports(Database(db_path), full.run_id, report_dir)
         summaries.append(_result_payload("full", full, full_report))
