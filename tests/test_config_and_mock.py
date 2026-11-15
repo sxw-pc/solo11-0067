@@ -137,7 +137,7 @@ def test_get_record_identifiers_and_post(api_client):
     )
     record = parse_record_element(record_node)
     assert record.identifier == "oai:demo.invalid:theses/0001"
-    assert record.metadata["title"][0].startswith("面向小型机构仓储")
+    assert record.metadata["title"][0].text.startswith("面向小型机构仓储")
 
     identifiers = api_client.get(
         "/oai?verb=ListIdentifiers&metadataPrefix=oai_dc"
@@ -175,7 +175,10 @@ def test_duplicate_arguments_and_tampered_token(api_client):
     )
     token = parse_record_page(first.root).token
     assert token is not None
-    tampered = token.value[:-1] + ("A" if token.value[-1] != "A" else "B")
+    # Tamper the first character: the final base64url character carries
+    # padding bits, so changing it may leave the decoded bytes (and the
+    # valid signature) unchanged.
+    tampered = ("A" if token.value[0] != "A" else "B") + token.value[1:]
     expect_error(
         get_bytes(
             api_client,

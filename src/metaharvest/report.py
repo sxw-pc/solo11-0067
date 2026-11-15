@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .db import Database
+from .language import (
+    POLICY_EXACT,
+    SELECTION_POLICIES,
+    select_localized,
+)
+from .normalize import DC_FIELD_ATTRIBUTES, DC_SCALAR_FIELDS
 from .oai_errors import ReportError
 from .util import atomic_write_text, ensure_directory, iso_z, sha256_bytes
 
@@ -74,7 +80,58 @@ def _verify_evidence(run: dict[str, Any], raw_responses: list[dict[str, Any]]) -
     }
 
 
-def build_report(db: Database, run_id: int) -> dict[str, Any]:
+def _legacy_record_view(record: dict[str, Any]) -> dict[str, Any]:
+    """Default report view: identical to the pre-localization output.
+
+    Localized values stay in the database as evidence; the default JSON
+    report keeps its historic shape so records without language tags are
+    byte-for-byte compatible.
+    """
+    view = dict(record)
+    view.pop("localized", None)
+    return view
+
+
+def _select_record_languages(
+    record: dict[str, Any], preferred: str, policy: str
+) -> dict[str, Any]:
+    """Apply the shared language resolver to every localized field.
+
+    Display values (title, creators, subjects, ...) are replaced by the
+    selected texts and the per-field fallback decision is recorded so
+    downstream consumers can explain each displayed value.
+    """
+    shaped = dict(record)
+    localized = record.get("localized") or {}
+    selection: dict[str, Any] = {}
+    for dc_field, attribute in DC_FIELD_ATTRIBUTES.items():
+        entries = localized.get(dc_field)
+        if not entries:
+            continue
+        chosen = select_localized(entries, preferred, policy)
+        if not chosen.texts:
+            continue
+        if dc_field in DC_SCALAR_FIELDS:
+            shaped[attribute] = chosen.texts[0]
+        else:
+            shaped[attribute] = list(chosen.texts)
+        selection[dc_field] = {
+            "matched": chosen.matched,
+            "languages": list(chosen.languages),
+        }
+    shaped["language_selection"] = selection
+    return shaped
+
+
+def build_report(
+    db: Database,
+    run_id: int,
+    *,
+    preferred_language: str | None = None,
+    policy: str = POLICY_EXACT,
+) -> dict[str, Any]:
+    if policy not in SELECTION_POLICIES:
+        raise ReportError(f"未知语言选择策略: {policy}")
     run = db.get_run(run_id)
     if run is None:
         raise ReportError(f"收割运行不存在: {run_id}")
@@ -83,16 +140,31 @@ def build_report(db: Database, run_id: int) -> dict[str, Any]:
     errors = db.errors_for_run(run_id)
     events = db.events_for_run(run_id)
     integrity = _verify_evidence(run, raw_responses)
-    return {
+    if preferred_language:
+        shaped_records = [
+            _select_record_languages(record, preferred_language, policy)
+            for record in records
+        ]
+        language_preference: dict[str, Any] | None = {
+            "requested": preferred_language,
+            "policy": policy,
+        }
+    else:
+        shaped_records = [_legacy_record_view(record) for record in records]
+        language_preference = None
+    report = {
         "schema_version": 1,
         "generated_at": iso_z(),
         "run": run,
-        "records": records,
+        "records": shaped_records,
         "raw_responses": raw_responses,
         "errors": errors,
         "events": events,
         "integrity": integrity,
     }
+    if language_preference is not None:
+        report["language_preference"] = language_preference
+    return report
 
 
 def _csv_text(records: Iterable[dict[str, Any]]) -> str:
@@ -215,8 +287,16 @@ def write_reports(
     run_id: int,
     output_dir: Path,
     formats: Iterable[str] = ("json", "csv", "markdown"),
+    *,
+    preferred_language: str | None = None,
+    policy: str = POLICY_EXACT,
 ) -> ReportOutput:
-    report = build_report(db, run_id)
+    report = build_report(
+        db,
+        run_id,
+        preferred_language=preferred_language,
+        policy=policy,
+    )
     root = ensure_directory(output_dir.expanduser().resolve())
     stem = f"harvest-run-{run_id:06d}"
     requested = {item.lower() for item in formats}

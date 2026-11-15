@@ -65,7 +65,7 @@ PYTHONPATH=src python -m metaharvest report --config configs/harvest_demo.yml --
 | `mock` | 启动内置 OAI-PMH 仓储，只允许配置绑定 loopback |
 | `harvest` | 执行一次收割；支持 `--from`、`--until`、`--set`、`--metadata-prefix`、`--max-pages` |
 | `harvest --resume RUN_ID` | 从台账中的 resumptionToken 断点续采 |
-| `report` | 生成可复核报告；`--format json csv markdown` |
+| `report` | 生成可复核报告；`--format json csv markdown`；`--preferred-language zh-CN --language-policy exact\|language-range` 选择多语言显示值 |
 | `status` | 查看最近收割运行 |
 | `demo` | 启动 mock、两轮增量语义演示、报告全流程 |
 
@@ -90,6 +90,13 @@ PYTHONPATH=src python -m metaharvest harvest --config configs/harvest_demo.yml -
 - 空结果返回 `noRecordsMatch`，收割器将其视为正常的 0 记录完成，并保留错误响应 XML。
 - Dublin Core 全字段归一化：标题、创建者、主题、描述、出版者、贡献者、日期、类型、格式、标识符、
   来源、语言、关系、覆盖范围和权限。
+- 每个 Dublin Core 值的 `xml:lang` 按 XML 继承规则解析（最近祖先生效、子元素覆盖、`xml:lang=""`
+  重置为无标签），并以有序的 `(字段, 文本, 语言)` 形式保存在 `records.localized_values`；
+  仅改语言标签也会被内容哈希识别为 `updated`。文本相同但语言不同的值不会被去重合并。
+  旧库打开时自动迁移：既有标量/列表值按“无标签”保留，不臆造语言标签。
+- 报告默认输出与旧版一致；指定 `--preferred-language` 后，标题与重复字段经统一语言解析器选择
+  显示值：`exact` 只匹配精确标签（再退回无标签值、首个源值），`language-range` 额外允许主子标签
+  匹配（如 `zh-CN` 可选中 `zh`）。JSON 报告记录每条记录的命中层级与选中语言，便于下游解释。
 - 规范化字段的稳定内容哈希驱动 `created / updated / unchanged / deleted` 统计；更新时间戳本身不会
   造成内容更新。
 - 原始响应逐页落盘为 `run-XXXXXX/page-XXXX.xml`，附 `.meta.json` 旁车文件，并在 SQLite 保存

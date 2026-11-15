@@ -73,6 +73,18 @@ def _parser() -> argparse.ArgumentParser:
         default=["all"],
         choices=["all", "json", "csv", "markdown", "md"],
     )
+    report.add_argument(
+        "--preferred-language",
+        metavar="TAG",
+        help="报告显示首选的 BCP 47 语言标签（如 zh-CN）；不指定则保持原有输出",
+    )
+    report.add_argument(
+        "--language-policy",
+        choices=["exact", "language-range"],
+        default=None,
+        help="语言匹配策略：exact 仅精确匹配标签；language-range 额外匹配主子标签"
+        "（默认 exact，需配合 --preferred-language）",
+    )
     report.set_defaults(handler=_cmd_report)
 
     status = sub.add_parser("status", help="查看收割运行台账")
@@ -173,6 +185,8 @@ def _cmd_report(args: argparse.Namespace) -> int:
         raise MetaHarvestError(f"收割运行不存在: {args.run_id}")
     if run is None:
         raise MetaHarvestError("台账中还没有收割运行")
+    if args.language_policy and not args.preferred_language:
+        raise MetaHarvestError("--language-policy 需要同时指定 --preferred-language")
     formats = (
         ("json", "csv", "markdown")
         if "all" in args.formats
@@ -183,6 +197,8 @@ def _cmd_report(args: argparse.Namespace) -> int:
         int(run["id"]),
         args.output_dir or config.storage.report_dir,
         formats=formats,
+        preferred_language=args.preferred_language,
+        policy=args.language_policy or "exact",
     )
     _emit(output.as_dict())
     return 0 if output.integrity["status"] == "ok" else 1

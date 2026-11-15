@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from metaharvest.language import LocalizedValue
 from metaharvest.normalize import normalize_record
 from metaharvest.oai_errors import OAIProtocolError, RecordParseError, XMLParseError
 from metaharvest.parser import (
@@ -91,8 +92,8 @@ def test_record_page_extraction_issues_and_token():
 
     active = page.records[0]
     assert active.identifier == "oai:demo.invalid:test/1"
-    assert active.metadata["title"] == ("A synthetic title",)
-    assert active.metadata["description"] == ("Demo & test",)
+    assert active.metadata["title"] == (LocalizedValue("A synthetic title", None),)
+    assert active.metadata["description"] == (LocalizedValue("Demo & test", None),)
     assert active.set_specs == ("beta", "alpha")
     assert active.deleted is False
     assert page.records[1].deleted is True

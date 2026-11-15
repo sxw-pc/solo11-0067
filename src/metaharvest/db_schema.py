@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+# Version 2 adds records.localized_values: ordered language-qualified Dublin
+# Core values as JSON {dc_field: [[text, language-or-null], ...]}.  Existing
+# databases are migrated additively; legacy scalar/list columns stay.
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS harvest_runs (
@@ -65,6 +68,7 @@ CREATE TABLE IF NOT EXISTS records (
     relations TEXT NOT NULL DEFAULT '[]',
     coverage TEXT NOT NULL DEFAULT '[]',
     rights TEXT NOT NULL DEFAULT '',
+    localized_values TEXT NOT NULL DEFAULT '{}',
     record_hash TEXT NOT NULL,
     first_harvested_at TEXT NOT NULL,
     last_harvested_at TEXT NOT NULL,

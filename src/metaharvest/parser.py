@@ -9,8 +9,12 @@ from defusedxml import ElementTree as SafeET
 from defusedxml.common import DefusedXmlException
 
 from .constants import DC_NAMESPACE, OAI_DC_NAMESPACE, OAI_NAMESPACE
+from .language import LocalizedValue
 from .oai_errors import OAIProtocolError, RecordParseError, XMLParseError
 from .util import collapse_ws
+
+XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+XML_LANG = f"{{{XML_NAMESPACE}}}lang"
 
 
 def q(namespace: str, local_name: str) -> str:
@@ -31,7 +35,7 @@ class ParsedRecord:
     datestamp: str
     set_specs: tuple[str, ...]
     deleted: bool
-    metadata: Mapping[str, tuple[str, ...]]
+    metadata: Mapping[str, tuple[LocalizedValue, ...]]
 
 
 @dataclass(frozen=True)
@@ -93,17 +97,33 @@ def parse_oai_response(content: bytes, *, request_url: str = "") -> OAIEnvelope:
     )
 
 
-def _extract_dc(metadata_node: object) -> dict[str, tuple[str, ...]]:
-    fields: dict[str, list[str]] = {}
-    for element in metadata_node.iter():
-        if not isinstance(element.tag, str) or not element.tag.startswith(
-            f"{{{DC_NAMESPACE}}}"
-        ):
-            continue
-        local_name = element.tag.split("}", 1)[1]
-        value = collapse_ws("".join(element.itertext()))
-        if value:
-            fields.setdefault(local_name, []).append(value)
+def _extract_dc(metadata_node: object) -> dict[str, tuple[LocalizedValue, ...]]:
+    """Collect Dublin Core values with their inherited ``xml:lang`` tags.
+
+    The walk carries the in-scope language down the metadata subtree: the
+    nearest ancestor ``xml:lang`` applies, a child declaration overrides it,
+    and an explicit ``xml:lang=""`` resets the value to untagged (``None``).
+    Original tag spelling is preserved for evidence.
+    """
+    fields: dict[str, list[LocalizedValue]] = {}
+
+    def walk(node: object, inherited_language: str | None) -> None:
+        language = inherited_language
+        if isinstance(node.tag, str):
+            declared = node.attrib.get(XML_LANG)
+            if declared is not None:
+                language = collapse_ws(declared) or None
+            if node.tag.startswith(f"{{{DC_NAMESPACE}}}"):
+                local_name = node.tag.split("}", 1)[1]
+                value = collapse_ws("".join(node.itertext()))
+                if value:
+                    fields.setdefault(local_name, []).append(
+                        LocalizedValue(value, language)
+                    )
+        for child in node:
+            walk(child, language)
+
+    walk(metadata_node, None)
     return {key: tuple(values) for key, values in fields.items()}
 
 
@@ -144,7 +164,7 @@ def parse_record_element(record_node: object) -> ParsedRecord:
     deleted = (header.get("status") or "").lower() == "deleted"
     metadata_node = record_node.find(q(OAI_NAMESPACE, "metadata"))
     if deleted:
-        metadata: dict[str, tuple[str, ...]] = {}
+        metadata: dict[str, tuple[LocalizedValue, ...]] = {}
     else:
         if metadata_node is None:
             raise RecordParseError(f"记录 {identifier} 缺少 metadata")
@@ -258,6 +278,7 @@ def parse_metadata_formats(content: bytes) -> tuple[dict[str, str], ...]:
 
 __all__ = [
     "OAI_DC_NAMESPACE",
+    "XML_LANG",
     "OAIEnvelope",
     "ParsedRecord",
     "RecordIssue",

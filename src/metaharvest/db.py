@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .db_schema import SCHEMA_SQL, SCHEMA_VERSION
-from .record_store import RecordStore
+from .record_store import RecordStore, migrate_legacy_localized
 from .util import ensure_directory, iso_z, json_loads
 
 
@@ -43,6 +43,13 @@ class Database:
     def initialize(self) -> None:
         with self._connect() as connection:
             connection.executescript(SCHEMA_SQL)
+            current = int(
+                connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            if current < 2:
+                # v1 -> v2: add records.localized_values and backfill existing
+                # scalar/list values as untagged legacy values.
+                migrate_legacy_localized(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.execute("PRAGMA journal_mode = WAL")
 
